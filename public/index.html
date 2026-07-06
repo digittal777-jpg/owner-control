@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Owner Control POS</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Owner control</p>
+        <h1>Clientes POS</h1>
+      </div>
+      <form class="token-form" id="token-form">
+        <label>
+          <span>OWNER_CONTROL_TOKEN</span>
+          <input id="owner-token" type="password" autocomplete="off" placeholder="pega el token del arranque actual" />
+        </label>
+        <button type="submit">Conectar</button>
+      </form>
+    </header>
+
+    <main class="shell">
+      <section class="panel client-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Cartera</p>
+            <h2>Negocios conectados</h2>
+          </div>
+          <button id="refresh-clients" type="button">Actualizar</button>
+        </div>
+
+        <form class="create-form" id="create-client-form">
+          <label>
+            <span>Negocio</span>
+            <input name="businessName" required maxlength="120" placeholder="Cremeria Rincon" />
+          </label>
+          <label>
+            <span>Slug</span>
+            <input name="slug" required maxlength="80" placeholder="cremeria-rincon" />
+          </label>
+          <label>
+            <span>URL POS</span>
+            <input name="baseUrl" maxlength="300" placeholder="https://cliente.com" />
+          </label>
+          <label>
+            <span>Plan</span>
+            <input name="planCode" maxlength="48" value="beta" />
+          </label>
+          <label>
+            <span>Mensualidad</span>
+            <input name="monthlyAmount" type="number" min="0" step="0.01" value="0" />
+          </label>
+          <button type="submit">Crear cliente</button>
+        </form>
+
+        <div class="secret-box" id="secret-box" hidden>
+          <strong>API key creada</strong>
+          <p>Guardala ahora. No se vuelve a mostrar completa.</p>
+          <pre id="secret-output"></pre>
+        </div>
+
+        <div class="status-line" id="status-line">Sin conexion.</div>
+
+        <form class="stack-form runtime-config-form" id="owner-runtime-config-form">
+          <h3>Variables owner-control</h3>
+          <div class="config-sync-summary" id="owner-runtime-config-summary"></div>
+          <div class="runtime-groups" id="owner-runtime-variables-wrap"></div>
+          <button type="submit">Guardar variables owner-control</button>
+        </form>
+
+        <div class="client-list" id="client-list"></div>
+      </section>
+
+      <section class="panel detail-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Detalle</p>
+            <h2 id="detail-title">Selecciona un cliente</h2>
+          </div>
+          <span class="status-pill" id="detail-status">Sin cliente</span>
+        </div>
+
+        <div class="summary-grid" id="summary-grid"></div>
+
+        <div class="detail-grid">
+          <form class="stack-form" id="subscription-form">
+            <h3>Suscripcion</h3>
+            <label>
+              <span>Estado</span>
+              <select name="status">
+                <option value="trial">trial</option>
+                <option value="active">active</option>
+                <option value="overdue">overdue</option>
+                <option value="suspended">suspended</option>
+                <option value="cancelled">cancelled</option>
+              </select>
+            </label>
+            <label>
+              <span>Plan</span>
+              <input name="planCode" maxlength="48" />
+            </label>
+            <label>
+              <span>Mensualidad</span>
+              <input name="monthlyAmount" type="number" min="0" step="0.01" />
+            </label>
+            <label>
+              <span>Inicio</span>
+              <input name="currentPeriodStart" type="date" />
+            </label>
+            <label>
+              <span>Corte</span>
+              <input name="currentPeriodEnd" type="date" />
+            </label>
+            <label>
+              <span>Gracia</span>
+              <input name="gracePeriodUntil" type="date" />
+            </label>
+            <button type="submit">Guardar suscripcion</button>
+          </form>
+
+          <form class="stack-form" id="payment-form">
+            <h3>Registrar pago</h3>
+            <label>
+              <span>Monto</span>
+              <input name="amount" type="number" min="0.01" step="0.01" required />
+            </label>
+            <label>
+              <span>Metodo</span>
+              <input name="paymentMethod" maxlength="60" value="Transferencia" />
+            </label>
+            <label>
+              <span>Desde</span>
+              <input name="periodStart" type="date" />
+            </label>
+            <label>
+              <span>Hasta</span>
+              <input name="periodEnd" type="date" />
+            </label>
+            <label>
+              <span>Nota</span>
+              <textarea name="notes" rows="3"></textarea>
+            </label>
+            <button type="submit">Registrar pago</button>
+          </form>
+
+          <form class="stack-form config-form" id="client-config-form">
+            <h3>Configuracion POS</h3>
+            <div class="config-sync-summary" id="client-config-sync-summary"></div>
+            <div>
+              <span class="group-label">Modulos del negocio</span>
+              <div class="toggle-grid" id="client-modules-wrap"></div>
+            </div>
+            <div>
+              <span class="group-label">Secciones admin visibles</span>
+              <div class="toggle-grid compact" id="client-admin-sections-wrap"></div>
+            </div>
+            <button type="submit">Guardar configuracion POS</button>
+          </form>
+
+          <form class="stack-form runtime-config-form" id="client-runtime-config-form">
+            <h3>Variables POS</h3>
+            <div class="config-sync-summary" id="client-runtime-config-summary"></div>
+            <div class="runtime-groups" id="client-runtime-variables-wrap"></div>
+            <button type="submit">Guardar variables POS</button>
+          </form>
+        </div>
+
+        <div class="actions-row">
+          <button id="rotate-key" type="button">Rotar API key</button>
+        </div>
+
+        <div class="records-grid">
+          <section>
+            <h3>Pagos</h3>
+            <div class="record-list" id="payments-list"></div>
+          </section>
+          <section>
+            <h3>Salud POS</h3>
+            <div class="record-list" id="health-list"></div>
+          </section>
+          <section>
+            <h3>Validaciones</h3>
+            <div class="record-list" id="validation-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
