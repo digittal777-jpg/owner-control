@@ -684,6 +684,28 @@ pre {
   padding: 12px;
 }
 
+.pairing-bootstrap-notice {
+  display: grid;
+  gap: 7px;
+  border: 1px solid rgba(224, 167, 47, 0.34);
+  border-radius: 8px;
+  background: var(--amber-soft);
+  padding: 12px;
+}
+
+.pairing-bootstrap-notice p,
+.pairing-bootstrap-notice small {
+  margin: 0;
+  color: var(--muted);
+}
+
+.pairing-bootstrap-notice code {
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 7px 9px;
+}
+
 .runtime-focus-head {
   display: grid;
   gap: 3px;

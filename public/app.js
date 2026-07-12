@@ -75,10 +75,8 @@ const CLIENT_RUNTIME_PRIMARY_KEYS = new Set([
   "POS_ALLOWED_ORIGINS",
   "POS_FORCE_HTTPS",
   "POS_SECURE_COOKIES",
+  "POS_TRUST_PROXY",
   "POS_CASHIER_SESSION_TTL_MS",
-  "CONTROL_API_URL",
-  "CONTROL_CLIENT_SLUG",
-  "CONTROL_CLIENT_SECRET",
   "RAILWAY_COST_SAVER_MODE",
   "CONTROL_CONFIG_POLL_MS",
   "BACKUP_ENABLED",
@@ -496,11 +494,27 @@ function renderClientRuntimeConfig(detail) {
   const variables = Array.isArray(runtimeConfig.variables)
     ? runtimeConfig.variables
     : detail?.runtimeVariables || [];
-  refs.clientRuntimeVariablesWrap.innerHTML = renderRuntimeVariableCollection(
-    variables,
-    CLIENT_RUNTIME_PRIMARY_KEYS,
-    "Sin variables runtime configurables.",
-  );
+  const controlApiUrl = getSuggestedControlApiUrl();
+  const pairingNotice = client
+    ? `
+        <section class="pairing-bootstrap-notice">
+          <strong>Conexion inicial del POS</strong>
+          <p>Owner-control administra todas las variables operativas. Estas tres forman el canal de emparejamiento y se configuran una sola vez en Railway, dentro del servicio POS:</p>
+          <code>CONTROL_API_URL=${escapeHtml(controlApiUrl)}</code>
+          <code>CONTROL_CLIENT_SLUG=${escapeHtml(client.slug || "")}</code>
+          <code>CONTROL_CLIENT_SECRET=&lt;API key creada o rotada&gt;</code>
+          <small>Usa "Rotar API key" al final de esta seccion y copia el bloque generado a Railway. La llave completa no se guarda ni vuelve a mostrarse aqui.</small>
+        </section>
+      `
+    : "";
+  refs.clientRuntimeVariablesWrap.innerHTML = `
+    ${pairingNotice}
+    ${renderRuntimeVariableCollection(
+      variables.filter((variable) => variable.managedByClientSync !== false),
+      CLIENT_RUNTIME_PRIMARY_KEYS,
+      "Sin variables runtime configurables.",
+    )}
+  `;
 }
 
 function renderClientRuntimeConfigSyncSummary(detail) {
@@ -592,7 +606,6 @@ function getRuntimeConfigPayload(form = refs.clientRuntimeConfigForm) {
     .querySelectorAll("[data-runtime-key]")
     .forEach((field) => {
       const key = field.dataset.runtimeKey || "";
-      const isSecret = field.dataset.runtimeSecret === "true";
       const value = String(field.value || "").trim();
       const clearInput = [...form.querySelectorAll("[data-runtime-clear]")]
         .find((input) => input.dataset.runtimeClear === key);
@@ -600,7 +613,7 @@ function getRuntimeConfigPayload(form = refs.clientRuntimeConfigForm) {
         clearKeys.push(key);
         return;
       }
-      if (isSecret && !value) {
+      if (!value) {
         return;
       }
       values[key] = value;
@@ -831,12 +844,6 @@ async function refreshSelectedDetailQuietly() {
   if (!state.selectedSlug || !getToken() || document.hidden) {
     return;
   }
-  const activeElement = document.activeElement;
-  const isEditingField = Boolean(
-    activeElement
-    && ["INPUT", "SELECT", "TEXTAREA"].includes(activeElement.tagName)
-    && activeElement.closest(".stack-form"),
-  );
   try {
     const response = await ownerFetch(`/api/owner/clients/${encodeURIComponent(state.selectedSlug)}`);
     state.detail = response;
@@ -844,13 +851,12 @@ async function refreshSelectedDetailQuietly() {
       client.slug === response.client?.slug ? response.client : client
     ));
     renderClients();
-    if (isEditingField) {
-      renderSummary(response);
-      renderClientConfigSyncSummary(response);
-      renderClientRuntimeConfigSyncSummary(response);
-      return;
-    }
-    renderDetail();
+    renderSummary(response);
+    renderClientConfigSyncSummary(response);
+    renderClientRuntimeConfigSyncSummary(response);
+    renderPayments(response.payments || []);
+    renderHealth(response.healthReports || []);
+    renderValidations(response.validationReports || []);
   } catch (_error) {
     // El panel puede quedar abierto mientras el servicio reinicia; no molestamos al owner.
   }

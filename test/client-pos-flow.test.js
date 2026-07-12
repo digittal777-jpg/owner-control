@@ -6,6 +6,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 
+const Database = require("better-sqlite3");
+
 const { createApp } = require("../src/app");
 const { createControlStore } = require("../src/store");
 
@@ -94,6 +96,15 @@ function signedClientHeaders(slug, apiKey, method, pathname, body = "") {
   };
 }
 
+function readStoredRuntimeJson(dbPath, slug) {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return String(db.prepare("SELECT runtime_config_json FROM clients WHERE slug = ?").get(slug)?.runtime_config_json || "");
+  } finally {
+    db.close();
+  }
+}
+
 async function createClient(baseUrl, slug = "cremeria-rincon") {
   const response = await json(baseUrl, "/api/owner/clients", {
     method: "POST",
@@ -162,6 +173,19 @@ test("owner-control accepts a POS-like signed client lifecycle and rejects repla
   assert.equal(configSync.body.configSync.status, "applied");
   assert.equal(configSync.body.configSync.inSync, true);
 
+  const invalidPairingUpdate = await json(server.baseUrl, `/api/owner/clients/${slug}/runtime-config`, {
+    method: "PATCH",
+    headers: ownerHeaders(),
+    body: JSON.stringify({
+      values: {
+        CONTROL_API_URL: "https://owner-control.example",
+        CONTROL_CLIENT_SECRET: "pos_plaintext_should_not_be_stored",
+      },
+    }),
+  });
+  assert.equal(invalidPairingUpdate.status, 400);
+  assert.match(String(invalidPairingUpdate.body?.message || ""), /entorno del servicio POS.*Variables de Railway/i);
+
   const runtimeUpdate = await json(server.baseUrl, `/api/owner/clients/${slug}/runtime-config`, {
     method: "PATCH",
     headers: ownerHeaders(),
@@ -184,6 +208,7 @@ test("owner-control accepts a POS-like signed client lifecycle and rejects repla
   assert.equal(ownerRuntimeRead.status, 200);
   const bootstrapVariable = ownerRuntimeRead.body.runtimeConfig.variables.find((variable) => variable.key === "POS_BOOTSTRAP_TOKEN");
   const railwaySaverVariable = ownerRuntimeRead.body.runtimeConfig.variables.find((variable) => variable.key === "RAILWAY_COST_SAVER_MODE");
+  assert.equal(ownerRuntimeRead.body.runtimeConfig.variables.some((variable) => variable.key === "CONTROL_CLIENT_SECRET"), false);
   assert.equal(bootstrapVariable.hasStoredValue, true);
   assert.equal(bootstrapVariable.maskedValue, "********");
   assert.equal(bootstrapVariable.value, "");
@@ -281,6 +306,46 @@ test("owner-control accepts a POS-like signed client lifecycle and rejects repla
   assert.equal(detail.body.healthReports.length, 1);
   assert.equal(detail.body.validationReports.length, 1);
   assert.equal(detail.body.validationReports[0].status, "ok");
+});
+
+test("owner-control scrubs legacy plaintext pairing values from client runtime storage", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "owner-control-pairing-scrub-"));
+  const dbPath = path.join(tempDir, "owner-control.sqlite");
+  const legacySecret = "pos_legacy_plaintext_secret";
+  let store = createControlStore({ dbPath });
+
+  try {
+    store.createClient({
+      slug: "legacy-pairing",
+      businessName: "Legacy Pairing",
+      baseUrl: "http://localhost:3100",
+    });
+    store.close();
+    store = null;
+
+    const legacyDb = new Database(dbPath);
+    legacyDb.prepare("UPDATE clients SET runtime_config_json = ? WHERE slug = ?").run(JSON.stringify({
+      POS_PUBLIC_ORIGIN: "https://legacy.example",
+      CONTROL_API_URL: "https://owner-control.example",
+      CONTROL_CLIENT_SLUG: "legacy-pairing",
+      CONTROL_CLIENT_SECRET: legacySecret,
+    }), "legacy-pairing");
+    legacyDb.close();
+
+    assert.match(readStoredRuntimeJson(dbPath, "legacy-pairing"), new RegExp(legacySecret));
+
+    store = createControlStore({ dbPath });
+    const runtime = store.getClientRuntimeConfig("legacy-pairing", { includeValues: true });
+    assert.equal(runtime.runtimeConfig.values.POS_PUBLIC_ORIGIN, "https://legacy.example");
+    assert.equal(runtime.runtimeConfig.values.CONTROL_CLIENT_SECRET, undefined);
+    store.close();
+    store = null;
+
+    assert.doesNotMatch(readStoredRuntimeJson(dbPath, "legacy-pairing"), new RegExp(legacySecret));
+  } finally {
+    store?.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("owner-control key rotation invalidates the old POS key and accepts the new signed POS key", async (t) => {

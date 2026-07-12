@@ -58,10 +58,7 @@ const RUNTIME_VARIABLE_DEFINITIONS = [
   { key: "POS_CASHIER_SESSION_TTL_MS", group: "Seguridad", label: "TTL sesion cajero", description: "Milisegundos que dura una sesion de cajero antes de requerir nuevo login.", placeholder: "604800000" },
   { key: "POS_ADMIN_LOGIN_WINDOW_MS", group: "Seguridad", label: "Ventana login admin", description: "Milisegundos de ventana de intentos.", placeholder: "900000" },
   { key: "POS_ADMIN_LOGIN_LOCK_MS", group: "Seguridad", label: "Bloqueo login admin", description: "Milisegundos de bloqueo.", placeholder: "900000" },
-  { key: "CONTROL_API_URL", group: "Owner-control", label: "URL owner-control", description: "API central. Usa HTTPS fuera de localhost.", placeholder: "https://owner-control.ejemplo.com" },
   { key: "CONTROL_REQUIRE_HTTPS", group: "Owner-control", label: "Compatibilidad HTTPS central", description: "Compatibilidad legacy. El POS sigue exigiendo HTTPS fuera de localhost aunque este valor se ponga en false.", placeholder: "true", type: "select", options: ["", "true", "false"] },
-  { key: "CONTROL_CLIENT_SLUG", group: "Owner-control", label: "Slug cliente", description: "Identificador del cliente.", placeholder: "cremeria-rincon" },
-  { key: "CONTROL_CLIENT_SECRET", group: "Owner-control", label: "API key cliente", description: "Secreto cliente. La sync activa conserva el emparejamiento local.", placeholder: "pos_...", secret: true },
   { key: "RAILWAY_COST_SAVER_MODE", group: "Compatibilidad", label: "Ahorro Railway", description: "Activa defaults de bajo consumo en Railway, incluyendo polling saliente apagado salvo configuracion explicita.", placeholder: "true", type: "select", options: ["", "true", "false"] },
   { key: "CONTROL_CONFIG_POLL_MS", group: "Owner-control", label: "Polling config", description: "Milisegundos entre consultas automaticas. Usa 0 en Railway para permitir sleep serverless.", placeholder: "0 en Railway, 30000 local" },
   { key: "CONTROL_SYNC_TIMEOUT_MS", group: "Owner-control", label: "Timeout sync", description: "Tiempo maximo de llamadas al owner-control.", placeholder: "8000" },
@@ -282,14 +279,18 @@ function cloneOwnerRuntimeVariableDefinitions() {
   }));
 }
 
-function normalizeRuntimeValues(input) {
-  const source = input && typeof input === "object" && !Array.isArray(input)
+function getRuntimeValueSource(input) {
+  return input && typeof input === "object" && !Array.isArray(input)
     ? input.env && typeof input.env === "object" && !Array.isArray(input.env)
       ? input.env
       : input.values && typeof input.values === "object" && !Array.isArray(input.values)
         ? input.values
         : input
     : {};
+}
+
+function normalizeRuntimeValues(input) {
+  const source = getRuntimeValueSource(input);
 
   return Object.entries(source).reduce((result, [key, value]) => {
     const safeKey = String(key || "").trim();
@@ -299,6 +300,15 @@ function normalizeRuntimeValues(input) {
     result[safeKey] = Array.isArray(value) ? value.join(",") : String(value).trim();
     return result;
   }, {});
+}
+
+function getRequestedPairingRuntimeKeys(input) {
+  const valueKeys = Object.keys(getRuntimeValueSource(input));
+  const clearKeys = Array.isArray(input?.clearKeys) ? input.clearKeys : [];
+  return [...new Set([...valueKeys, ...clearKeys]
+    .map((key) => String(key || "").trim())
+    .filter((key) => PAIRING_RUNTIME_KEYS.has(key)))]
+    .sort();
 }
 
 function normalizeOwnerRuntimeValues(input) {
@@ -1046,6 +1056,29 @@ function initializeSchema(db) {
   `).run();
 }
 
+function scrubLegacyClientPairingRuntimeValues(db) {
+  const rows = db.prepare("SELECT slug, runtime_config_json FROM clients").all();
+  const updateRuntime = db.prepare("UPDATE clients SET runtime_config_json = ? WHERE slug = ?");
+
+  db.transaction(() => {
+    rows.forEach((row) => {
+      const stored = safeJsonParse(row.runtime_config_json, {});
+      const source = getRuntimeValueSource(stored);
+      const containsPairingValue = [...PAIRING_RUNTIME_KEYS]
+        .some((key) => Object.prototype.hasOwnProperty.call(source, key));
+      if (!containsPairingValue) {
+        return;
+      }
+
+      const sanitizedValues = { ...source };
+      PAIRING_RUNTIME_KEYS.forEach((key) => {
+        delete sanitizedValues[key];
+      });
+      updateRuntime.run(stableRuntimeJson(sanitizedValues), row.slug);
+    });
+  })();
+}
+
 function ensureColumn(db, tableName, columnName, columnDdl) {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
   if (!columns.some((column) => column.name === columnName)) {
@@ -1060,6 +1093,7 @@ function createControlStore(options = {}) {
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   initializeSchema(db);
+  scrubLegacyClientPairingRuntimeValues(db);
   const healthReportRetentionLimit = Math.max(
     1,
     Number(options.healthReportRetentionLimit || process.env.OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT || 200),
@@ -1313,6 +1347,13 @@ function createControlStore(options = {}) {
 
   function updateClientRuntimeConfig(slug, payload = {}) {
     const row = requireClientRow(slug);
+    const requestedPairingKeys = getRequestedPairingRuntimeKeys(payload);
+    if (requestedPairingKeys.length > 0) {
+      throw createHttpError(
+        `${requestedPairingKeys.join(", ")} forman el emparejamiento inicial y deben configurarse en el entorno del servicio POS (Variables de Railway en produccion).`,
+        400,
+      );
+    }
     const currentValues = parseRuntimeValues(row.runtime_config_json);
     const incomingValues = normalizeRuntimeValues(payload);
     const clearKeys = normalizeRuntimeKeyList(payload.clearKeys);
