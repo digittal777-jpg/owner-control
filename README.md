@@ -63,6 +63,9 @@ El propio panel owner ahora puede guardar su runtime endurecido en la SQLite pri
 - `OWNER_CONTROL_HSTS_MAX_AGE_SECONDS`
 - `OWNER_CONTROL_REQUIRE_CLIENT_SIGNATURE`
 - `OWNER_CONTROL_RATE_LIMIT_*`
+- `OWNER_CONTROL_CLIENT_SIGNATURE_NONCE_LIMIT`
+- `OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT`
+- `OWNER_CONTROL_VALIDATION_REPORT_RETENTION_LIMIT`
 
 Eso reduce la dependencia de Railway u otro host para la capa HTTPS diaria. Cuando guardas uno de esos cambios, el panel lo marca como `reinicio pendiente` porque el proceso Node debe reiniciar para volver a leer certificado, token, proxy y limites.
 
@@ -109,10 +112,31 @@ X-Client-Nonce: nonce-unico
 X-Client-Signature: sha256=<firma-hmac>
 ```
 
-## Siguiente integracion
+## Integracion POS actual
 
-El siguiente paso es agregar en el POS local un sincronizador que:
+El POS local ya incluye el sincronizador contra owner-control. El flujo esperado es:
 
-1. Consulte `/api/client/subscription`.
-2. Envie `/api/client/health` con el semaforo actual.
-3. Envie `/api/client/validation-report` despues de `validate:client`.
+1. Consulta `/api/client/subscription` para reflejar plan, estado y runtime administrado.
+2. Envia `/api/client/health` con el semaforo operativo actual.
+3. Envia `/api/client/validation-report` desde el flujo de `validate:client`.
+
+Para que funcione, el runtime del POS cliente debe tener `CONTROL_API_URL`, `CONTROL_CLIENT_SLUG` y `CONTROL_CLIENT_SECRET`. Si HTTPS esta forzado, las llamadas cliente usan firma HMAC con timestamp y nonce.
+
+## Retencion y limites
+
+Owner-control conserva limites en memoria para rate limit y nonces HMAC, y poda reportes historicos por cliente para evitar crecimiento indefinido:
+
+```txt
+OWNER_CONTROL_RATE_LIMIT_BUCKET_LIMIT=5000
+OWNER_CONTROL_CLIENT_SIGNATURE_NONCE_LIMIT=5000
+OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT=200
+OWNER_CONTROL_VALIDATION_REPORT_RETENTION_LIMIT=200
+```
+
+## Pruebas
+
+```bash
+npm test
+```
+
+El smoke test local levanta la app con una SQLite temporal y valida `/api/health`.

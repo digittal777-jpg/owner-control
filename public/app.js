@@ -32,6 +32,7 @@ const state = {
   clients: [],
   ownerRuntime: null,
   selectedSlug: "",
+  detailSection: "config",
   detail: null,
   loading: false,
 };
@@ -48,6 +49,8 @@ const refs = {
   ownerRuntimeConfigSummary: document.getElementById("owner-runtime-config-summary"),
   ownerRuntimeVariablesWrap: document.getElementById("owner-runtime-variables-wrap"),
   clientList: document.getElementById("client-list"),
+  detailPanel: document.getElementById("detail-panel"),
+  detailTabs: document.getElementById("detail-tabs"),
   detailTitle: document.getElementById("detail-title"),
   detailStatus: document.getElementById("detail-status"),
   summaryGrid: document.getElementById("summary-grid"),
@@ -65,6 +68,44 @@ const refs = {
   healthList: document.getElementById("health-list"),
   validationList: document.getElementById("validation-list"),
 };
+
+const DETAIL_SECTIONS = new Set(["config", "runtime", "billing", "history"]);
+const CLIENT_RUNTIME_PRIMARY_KEYS = new Set([
+  "POS_PUBLIC_ORIGIN",
+  "POS_ALLOWED_ORIGINS",
+  "POS_FORCE_HTTPS",
+  "POS_SECURE_COOKIES",
+  "POS_CASHIER_SESSION_TTL_MS",
+  "CONTROL_API_URL",
+  "CONTROL_CLIENT_SLUG",
+  "CONTROL_CLIENT_SECRET",
+  "RAILWAY_COST_SAVER_MODE",
+  "CONTROL_CONFIG_POLL_MS",
+  "BACKUP_ENABLED",
+]);
+const OWNER_RUNTIME_PRIMARY_KEYS = new Set([
+  "OWNER_CONTROL_TOKEN",
+  "OWNER_CONTROL_PUBLIC_ORIGIN",
+  "OWNER_CONTROL_FORCE_HTTPS",
+  "OWNER_CONTROL_REQUIRE_CLIENT_SIGNATURE",
+  "OWNER_CONTROL_TRUST_PROXY",
+  "OWNER_CONTROL_RATE_LIMIT_MAX",
+  "OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT",
+]);
+const RUNTIME_GROUP_ORDER = [
+  "Red",
+  "Seguridad",
+  "Owner-control",
+  "Backups",
+  "Telegram",
+  "Correo",
+  "POS",
+  "Host",
+  "Compatibilidad",
+  "API cliente",
+  "Retencion",
+  "General",
+];
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -182,6 +223,9 @@ function setDetailFormsEnabled(enabled) {
     });
   });
   refs.rotateKey.disabled = !enabled;
+  refs.detailTabs?.querySelectorAll("[data-detail-section]").forEach((button) => {
+    button.disabled = !enabled;
+  });
 }
 
 function setOwnerRuntimeFormEnabled(enabled) {
@@ -200,6 +244,29 @@ function resetAuthenticatedOwnerState() {
   renderOwnerRuntimeConfig();
   setDetailFormsEnabled(false);
   setOwnerRuntimeFormEnabled(false);
+}
+
+function setDetailSection(section) {
+  state.detailSection = DETAIL_SECTIONS.has(section) ? section : "config";
+  renderDetailSection();
+}
+
+function renderDetailSection() {
+  const section = DETAIL_SECTIONS.has(state.detailSection) ? state.detailSection : "config";
+  if (refs.detailPanel) {
+    refs.detailPanel.dataset.activeSection = section;
+  }
+  refs.detailTabs?.querySelectorAll("[data-detail-section]").forEach((button) => {
+    const isActive = button.dataset.detailSection === section;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  refs.detailPanel?.querySelectorAll("[data-detail-section-panel]").forEach((panel) => {
+    const sections = String(panel.dataset.detailSectionPanel || "")
+      .split(/\s+/)
+      .filter(Boolean);
+    panel.hidden = !sections.includes(section);
+  });
 }
 
 function renderClients() {
@@ -346,21 +413,38 @@ function renderClientConfigSyncSummary(detail) {
   }
 }
 
-function renderClientRuntimeConfig(detail) {
-  const client = detail?.client;
-  const runtimeConfig = client?.runtimeConfig || {};
-  const sync = runtimeConfig.sync || {};
-  renderClientRuntimeConfigSyncSummary(detail);
-  const variables = Array.isArray(runtimeConfig.variables)
-    ? runtimeConfig.variables
-    : detail?.runtimeVariables || [];
-  const groups = variables.reduce((result, variable) => {
+function sortRuntimeVariables(variables = []) {
+  return [...variables].sort((left, right) => {
+    const leftGroupIndex = RUNTIME_GROUP_ORDER.indexOf(left.group || "General");
+    const rightGroupIndex = RUNTIME_GROUP_ORDER.indexOf(right.group || "General");
+    const safeLeftGroupIndex = leftGroupIndex >= 0 ? leftGroupIndex : RUNTIME_GROUP_ORDER.length;
+    const safeRightGroupIndex = rightGroupIndex >= 0 ? rightGroupIndex : RUNTIME_GROUP_ORDER.length;
+    if (safeLeftGroupIndex !== safeRightGroupIndex) {
+      return safeLeftGroupIndex - safeRightGroupIndex;
+    }
+    return String(left.label || left.key || "").localeCompare(String(right.label || right.key || ""), "es");
+  });
+}
+
+function groupRuntimeVariables(variables = []) {
+  return sortRuntimeVariables(variables).reduce((result, variable) => {
     const groupName = variable.group || "General";
     result[groupName] = result[groupName] || [];
     result[groupName].push(variable);
     return result;
   }, {});
-  refs.clientRuntimeVariablesWrap.innerHTML = Object.keys(groups).length
+}
+
+function splitRuntimeVariables(variables = [], primaryKeys = new Set()) {
+  const sortedVariables = sortRuntimeVariables(variables);
+  const primary = sortedVariables.filter((variable) => primaryKeys.has(variable.key));
+  const advanced = sortedVariables.filter((variable) => !primaryKeys.has(variable.key));
+  return { primary, advanced };
+}
+
+function renderRuntimeGroupSections(variables = []) {
+  const groups = groupRuntimeVariables(variables);
+  return Object.keys(groups).length
     ? Object.entries(groups).map(([groupName, items]) => `
         <section class="runtime-group">
           <h4>${escapeHtml(groupName)}</h4>
@@ -369,7 +453,54 @@ function renderClientRuntimeConfig(detail) {
           </div>
         </section>
       `).join("")
-    : `<div class="empty-state">Sin variables runtime configurables.</div>`;
+    : "";
+}
+
+function renderRuntimeVariableCollection(variables = [], primaryKeys = new Set(), emptyLabel = "Sin variables runtime configurables.") {
+  if (!variables.length) {
+    return `<div class="empty-state">${escapeHtml(emptyLabel)}</div>`;
+  }
+
+  const { primary, advanced } = splitRuntimeVariables(variables, primaryKeys);
+  const focusVariables = primary.length ? primary : sortRuntimeVariables(variables).slice(0, 4);
+  const advancedVariables = primary.length ? advanced : sortRuntimeVariables(variables).slice(4);
+
+  return `
+    <section class="runtime-focus">
+      <div class="runtime-focus-head">
+        <span>Prioridad</span>
+        <strong>Conexion, seguridad y costo</strong>
+        <small>${focusVariables.length} ajuste(s)</small>
+      </div>
+      <div class="runtime-grid runtime-priority-grid">
+        ${focusVariables.map((variable) => renderRuntimeVariableField(variable, { priority: true })).join("")}
+      </div>
+    </section>
+    ${advancedVariables.length ? `
+      <details class="runtime-advanced">
+        <summary>
+          <span>Avanzado</span>
+          <strong>${advancedVariables.length} variable(s)</strong>
+        </summary>
+        ${renderRuntimeGroupSections(advancedVariables)}
+      </details>
+    ` : ""}
+  `;
+}
+
+function renderClientRuntimeConfig(detail) {
+  const client = detail?.client;
+  const runtimeConfig = client?.runtimeConfig || {};
+  const sync = runtimeConfig.sync || {};
+  renderClientRuntimeConfigSyncSummary(detail);
+  const variables = Array.isArray(runtimeConfig.variables)
+    ? runtimeConfig.variables
+    : detail?.runtimeVariables || [];
+  refs.clientRuntimeVariablesWrap.innerHTML = renderRuntimeVariableCollection(
+    variables,
+    CLIENT_RUNTIME_PRIMARY_KEYS,
+    "Sin variables runtime configurables.",
+  );
 }
 
 function renderClientRuntimeConfigSyncSummary(detail) {
@@ -394,12 +525,6 @@ function renderOwnerRuntimeConfig() {
   const variables = Array.isArray(runtimeConfig.variables)
     ? runtimeConfig.variables
     : state.ownerRuntime?.runtimeVariables || [];
-  const groups = variables.reduce((result, variable) => {
-    const groupName = variable.group || "General";
-    result[groupName] = result[groupName] || [];
-    result[groupName].push(variable);
-    return result;
-  }, {});
 
   const summaryKind = runtimeConfig.restartRequired ? "pending" : "applied";
   refs.ownerRuntimeConfigSummary.className = `config-sync-summary ${sanitizeClassToken(summaryKind, "unknown")}`;
@@ -411,21 +536,16 @@ function renderOwnerRuntimeConfig() {
       `
     : `<div class="empty-state">Conecta el token owner para editar el runtime de owner-control.</div>`;
 
-  refs.ownerRuntimeVariablesWrap.innerHTML = Object.keys(groups).length
-    ? Object.entries(groups).map(([groupName, items]) => `
-        <section class="runtime-group">
-          <h4>${escapeHtml(groupName)}</h4>
-          <div class="runtime-grid">
-            ${items.map((variable) => renderRuntimeVariableField(variable)).join("")}
-          </div>
-        </section>
-      `).join("")
-    : `<div class="empty-state">Sin variables runtime configurables.</div>`;
+  refs.ownerRuntimeVariablesWrap.innerHTML = renderRuntimeVariableCollection(
+    variables,
+    OWNER_RUNTIME_PRIMARY_KEYS,
+    "Sin variables runtime configurables.",
+  );
 }
 
-function renderRuntimeVariableField(variable) {
+function renderRuntimeVariableField(variable, options = {}) {
   const isSecret = Boolean(variable.secret);
-  const options = Array.isArray(variable.options) ? variable.options : [];
+  const selectOptions = Array.isArray(variable.options) ? variable.options : [];
   const hasStoredValue = Boolean(variable.hasStoredValue);
   const value = variable.value || "";
   const managedHint = variable.managedHint || (
@@ -435,7 +555,7 @@ function renderRuntimeVariableField(variable) {
   );
   const control = variable.type === "select"
     ? `<select name="${escapeHtml(variable.key)}" data-runtime-key="${escapeHtml(variable.key)}" data-runtime-secret="${isSecret ? "true" : "false"}">
-        ${options.map((option) => `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option || "sin valor")}</option>`).join("")}
+        ${selectOptions.map((option) => `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option || "sin valor")}</option>`).join("")}
       </select>`
     : `<input
         name="${escapeHtml(variable.key)}"
@@ -448,11 +568,11 @@ function renderRuntimeVariableField(variable) {
         spellcheck="false"
       />`;
   return `
-    <label class="runtime-field">
+    <label class="runtime-field ${options.priority ? "priority" : ""}">
       <span>${escapeHtml(variable.label || variable.key)}</span>
       ${control}
-      <small>${escapeHtml(variable.key)} - ${escapeHtml(managedHint)}${hasStoredValue ? " - guardada" : ""}</small>
-      <small>${escapeHtml(isSecret && hasStoredValue ? "Deja vacio para conservar el secreto actual." : variable.description || "")}</small>
+      <small class="runtime-meta"><code>${escapeHtml(variable.key)}</code><span>${escapeHtml(managedHint)}${hasStoredValue ? " - guardada" : ""}</span></small>
+      <small class="runtime-desc">${escapeHtml(isSecret && hasStoredValue ? "Deja vacio para conservar el secreto actual." : variable.description || "")}</small>
       <span class="runtime-clear-row">
         <input type="checkbox" data-runtime-clear="${escapeHtml(variable.key)}" />
         <small>Limpiar variable</small>
@@ -638,6 +758,7 @@ function renderDetail() {
     renderHealth([]);
     renderValidations([]);
     setDetailFormsEnabled(false);
+    renderDetailSection();
     return;
   }
 
@@ -652,6 +773,7 @@ function renderDetail() {
   renderPayments(detail.payments || []);
   renderHealth(detail.healthReports || []);
   renderValidations(detail.validationReports || []);
+  renderDetailSection();
 }
 
 async function loadClients() {
@@ -775,6 +897,14 @@ refs.clientList.addEventListener("click", async (event) => {
   } catch (error) {
     setStatus(error.message || "No pude abrir el cliente.", "error");
   }
+});
+
+refs.detailTabs?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-detail-section]");
+  if (!button || button.disabled) {
+    return;
+  }
+  setDetailSection(button.dataset.detailSection);
 });
 
 refs.subscriptionForm.addEventListener("submit", async (event) => {

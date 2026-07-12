@@ -73,7 +73,7 @@
         <div class="client-list" id="client-list"></div>
       </section>
 
-      <section class="panel detail-panel">
+      <section class="panel detail-panel" id="detail-panel" data-active-section="config">
         <div class="panel-head">
           <div>
             <p class="eyebrow">Detalle</p>
@@ -84,8 +84,15 @@
 
         <div class="summary-grid" id="summary-grid"></div>
 
+        <div class="owner-workspace-tabs" id="detail-tabs" role="tablist" aria-label="Secciones del cliente">
+          <button class="active" type="button" data-detail-section="config">Accesos POS</button>
+          <button type="button" data-detail-section="runtime">Variables POS</button>
+          <button type="button" data-detail-section="billing">Cobranza</button>
+          <button type="button" data-detail-section="history">Historial</button>
+        </div>
+
         <div class="detail-grid">
-          <form class="stack-form" id="subscription-form">
+          <form class="stack-form" id="subscription-form" data-detail-section-panel="billing">
             <h3>Suscripcion</h3>
             <label>
               <span>Estado</span>
@@ -120,7 +127,7 @@
             <button type="submit">Guardar suscripcion</button>
           </form>
 
-          <form class="stack-form" id="payment-form">
+          <form class="stack-form" id="payment-form" data-detail-section-panel="billing">
             <h3>Registrar pago</h3>
             <label>
               <span>Monto</span>
@@ -145,7 +152,7 @@
             <button type="submit">Registrar pago</button>
           </form>
 
-          <form class="stack-form config-form" id="client-config-form">
+          <form class="stack-form config-form" id="client-config-form" data-detail-section-panel="config">
             <h3>Configuracion POS</h3>
             <div class="config-sync-summary" id="client-config-sync-summary"></div>
             <div>
@@ -159,7 +166,7 @@
             <button type="submit">Guardar configuracion POS</button>
           </form>
 
-          <form class="stack-form runtime-config-form" id="client-runtime-config-form">
+          <form class="stack-form runtime-config-form" id="client-runtime-config-form" data-detail-section-panel="runtime">
             <h3>Variables POS</h3>
             <div class="config-sync-summary" id="client-runtime-config-summary"></div>
             <div class="runtime-groups" id="client-runtime-variables-wrap"></div>
@@ -167,11 +174,11 @@
           </form>
         </div>
 
-        <div class="actions-row">
+        <div class="actions-row" data-detail-section-panel="runtime">
           <button id="rotate-key" type="button">Rotar API key</button>
         </div>
 
-        <div class="records-grid">
+        <div class="records-grid" data-detail-section-panel="history">
           <section>
             <h3>Pagos</h3>
             <div class="record-list" id="payments-list"></div>

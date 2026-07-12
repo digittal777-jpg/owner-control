@@ -12,7 +12,7 @@ function buildOwnerControlContentSecurityPolicy(forceHttps) {
     "frame-ancestors 'self'",
     "object-src 'none'",
     "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
+    "style-src 'self'",
     "img-src 'self' data:",
     "connect-src 'self'",
     "worker-src 'self' blob:",
@@ -214,6 +214,14 @@ function createApp(options = {}) {
   const publicOrigin = getConfiguredHttpsOrigin(options.publicOrigin || process.env.OWNER_CONTROL_PUBLIC_ORIGIN || "");
   const apiRateLimitWindowMs = Math.max(1000, Number(options.apiRateLimitWindowMs || process.env.OWNER_CONTROL_RATE_LIMIT_WINDOW_MS || 60_000));
   const apiRateLimitMax = Math.max(20, Number(options.apiRateLimitMax || process.env.OWNER_CONTROL_RATE_LIMIT_MAX || 600));
+  const apiRateLimitBucketLimit = Math.max(
+    1,
+    Number(options.apiRateLimitBucketLimit || process.env.OWNER_CONTROL_RATE_LIMIT_BUCKET_LIMIT || 5000),
+  );
+  const clientSignatureNonceLimit = Math.max(
+    1,
+    Number(options.clientSignatureNonceLimit || process.env.OWNER_CONTROL_CLIENT_SIGNATURE_NONCE_LIMIT || 5000),
+  );
   const rateLimitBuckets = new Map();
   const clientSignatureNonces = new Map();
   const ownerControlContentSecurityPolicy = buildOwnerControlContentSecurityPolicy(forceHttps);
@@ -226,6 +234,8 @@ function createApp(options = {}) {
   app.locals.ownerRuntimeBootValues = ownerRuntimeBootValues;
   app.locals.ownerRuntimeFallbackValues = ownerRuntimeFallbackValues;
   app.locals.ownerRuntimeIsProduction = ownerRuntimeIsProduction;
+  app.locals.rateLimitBuckets = rateLimitBuckets;
+  app.locals.clientSignatureNonces = clientSignatureNonces;
 
   app.disable("x-powered-by");
   app.set("trust proxy", trustProxySetting);
@@ -259,16 +269,37 @@ function createApp(options = {}) {
     }
     next();
   });
+  function pruneRateLimitBuckets(now = Date.now()) {
+    for (const [key, bucket] of rateLimitBuckets.entries()) {
+      if (!bucket || now - bucket.startedAt >= apiRateLimitWindowMs) {
+        rateLimitBuckets.delete(key);
+      }
+    }
+
+    if (rateLimitBuckets.size <= apiRateLimitBucketLimit) {
+      return;
+    }
+
+    [...rateLimitBuckets.entries()]
+      .sort((left, right) => Number(left[1]?.startedAt || 0) - Number(right[1]?.startedAt || 0))
+      .slice(0, rateLimitBuckets.size - apiRateLimitBucketLimit)
+      .forEach(([key]) => {
+        rateLimitBuckets.delete(key);
+      });
+  }
+
   app.use((request, response, next) => {
     if (!request.path.startsWith("/api/")) {
       next();
       return;
     }
     const now = Date.now();
+    pruneRateLimitBuckets(now);
     const key = `${request.ip || request.socket?.remoteAddress || "unknown"}:${request.path.split("/").slice(0, 4).join("/")}`;
     const bucket = rateLimitBuckets.get(key);
     if (!bucket || now - bucket.startedAt >= apiRateLimitWindowMs) {
       rateLimitBuckets.set(key, { startedAt: now, count: 1 });
+      pruneRateLimitBuckets(now);
       next();
       return;
     }
@@ -294,12 +325,23 @@ function createApp(options = {}) {
     },
   }));
 
-  function pruneClientSignatureNonces(now = Date.now()) {
+  function pruneClientSignatureNonces(now = Date.now(), targetSize = clientSignatureNonceLimit) {
     for (const [key, expiresAt] of clientSignatureNonces.entries()) {
       if (expiresAt <= now) {
         clientSignatureNonces.delete(key);
       }
     }
+
+    if (clientSignatureNonces.size <= targetSize) {
+      return;
+    }
+
+    [...clientSignatureNonces.entries()]
+      .sort((left, right) => Number(left[1] || 0) - Number(right[1] || 0))
+      .slice(0, clientSignatureNonces.size - targetSize)
+      .forEach(([key]) => {
+        clientSignatureNonces.delete(key);
+      });
   }
 
   function requireValidClientSignature(request, response, slug, secret) {
@@ -320,7 +362,7 @@ function createApp(options = {}) {
       response.status(401).json({ message: "Firma cliente expirada." });
       return false;
     }
-    pruneClientSignatureNonces(now);
+    pruneClientSignatureNonces(now, clientSignatureNonceLimit - 1);
     const nonceKey = `${slug}:${nonce}`;
     if (clientSignatureNonces.has(nonceKey)) {
       response.status(409).json({ message: "Nonce cliente repetido." });
@@ -340,6 +382,7 @@ function createApp(options = {}) {
       return false;
     }
     clientSignatureNonces.set(nonceKey, now + clientSignatureWindowMs);
+    pruneClientSignatureNonces(now);
     return true;
   }
 

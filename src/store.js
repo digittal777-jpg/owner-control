@@ -55,13 +55,15 @@ const RUNTIME_VARIABLE_DEFINITIONS = [
   { key: "POS_HSTS_MAX_AGE_SECONDS", group: "Seguridad", label: "HSTS segundos", description: "Tiempo para recordar HTTPS en navegadores.", placeholder: "31536000" },
   { key: "POS_BOOTSTRAP_TOKEN", group: "Seguridad", label: "Token bootstrap", description: "Token para setup inicial.", placeholder: "token-largo-privado", secret: true },
   { key: "POS_ADMIN_MAX_FAILED_LOGINS", group: "Seguridad", label: "Intentos admin", description: "Intentos fallidos antes de bloqueo.", placeholder: "5" },
+  { key: "POS_CASHIER_SESSION_TTL_MS", group: "Seguridad", label: "TTL sesion cajero", description: "Milisegundos que dura una sesion de cajero antes de requerir nuevo login.", placeholder: "604800000" },
   { key: "POS_ADMIN_LOGIN_WINDOW_MS", group: "Seguridad", label: "Ventana login admin", description: "Milisegundos de ventana de intentos.", placeholder: "900000" },
   { key: "POS_ADMIN_LOGIN_LOCK_MS", group: "Seguridad", label: "Bloqueo login admin", description: "Milisegundos de bloqueo.", placeholder: "900000" },
   { key: "CONTROL_API_URL", group: "Owner-control", label: "URL owner-control", description: "API central. Usa HTTPS fuera de localhost.", placeholder: "https://owner-control.ejemplo.com" },
   { key: "CONTROL_REQUIRE_HTTPS", group: "Owner-control", label: "Compatibilidad HTTPS central", description: "Compatibilidad legacy. El POS sigue exigiendo HTTPS fuera de localhost aunque este valor se ponga en false.", placeholder: "true", type: "select", options: ["", "true", "false"] },
   { key: "CONTROL_CLIENT_SLUG", group: "Owner-control", label: "Slug cliente", description: "Identificador del cliente.", placeholder: "cremeria-rincon" },
   { key: "CONTROL_CLIENT_SECRET", group: "Owner-control", label: "API key cliente", description: "Secreto cliente. La sync activa conserva el emparejamiento local.", placeholder: "pos_...", secret: true },
-  { key: "CONTROL_CONFIG_POLL_MS", group: "Owner-control", label: "Polling config", description: "Milisegundos entre consultas automaticas.", placeholder: "30000" },
+  { key: "RAILWAY_COST_SAVER_MODE", group: "Compatibilidad", label: "Ahorro Railway", description: "Activa defaults de bajo consumo en Railway, incluyendo polling saliente apagado salvo configuracion explicita.", placeholder: "true", type: "select", options: ["", "true", "false"] },
+  { key: "CONTROL_CONFIG_POLL_MS", group: "Owner-control", label: "Polling config", description: "Milisegundos entre consultas automaticas. Usa 0 en Railway para permitir sleep serverless.", placeholder: "0 en Railway, 30000 local" },
   { key: "CONTROL_SYNC_TIMEOUT_MS", group: "Owner-control", label: "Timeout sync", description: "Tiempo maximo de llamadas al owner-control.", placeholder: "8000" },
   { key: "CONTROL_CONFIG_SYNC_MAX_AGE_MS", group: "Owner-control", label: "Edad cache config", description: "Edad maxima de cache central.", placeholder: "15000" },
   { key: "TELEGRAM_BOT_TOKEN", group: "Telegram", label: "Bot token", description: "Token privado del bot.", placeholder: "123456:ABC...", secret: true },
@@ -109,6 +111,10 @@ const OWNER_RUNTIME_VARIABLE_DEFINITIONS = [
   { key: "OWNER_CONTROL_CLIENT_SIGNATURE_WINDOW_MS", group: "API cliente", label: "Ventana firma ms", description: "Tiempo valido para firmas cliente.", placeholder: "300000" },
   { key: "OWNER_CONTROL_RATE_LIMIT_WINDOW_MS", group: "API cliente", label: "Ventana rate limit ms", description: "Ventana de tiempo para el rate limit de owner-control.", placeholder: "60000" },
   { key: "OWNER_CONTROL_RATE_LIMIT_MAX", group: "API cliente", label: "Maximo rate limit", description: "Solicitudes permitidas por ventana antes de responder 429.", placeholder: "600" },
+  { key: "OWNER_CONTROL_RATE_LIMIT_BUCKET_LIMIT", group: "API cliente", label: "Buckets rate limit", description: "Maximo de buckets IP/ruta conservados en memoria.", placeholder: "5000" },
+  { key: "OWNER_CONTROL_CLIENT_SIGNATURE_NONCE_LIMIT", group: "API cliente", label: "Nonces firma", description: "Maximo de nonces HMAC recientes conservados en memoria.", placeholder: "5000" },
+  { key: "OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT", group: "Retencion", label: "Health reports", description: "Reportes de salud recientes a conservar por cliente.", placeholder: "200" },
+  { key: "OWNER_CONTROL_VALIDATION_REPORT_RETENTION_LIMIT", group: "Retencion", label: "Validation reports", description: "Reportes de validacion recientes a conservar por cliente.", placeholder: "200" },
 ].map((definition) => ({
   ...definition,
   restartRequired: true,
@@ -1054,6 +1060,14 @@ function createControlStore(options = {}) {
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   initializeSchema(db);
+  const healthReportRetentionLimit = Math.max(
+    1,
+    Number(options.healthReportRetentionLimit || process.env.OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT || 200),
+  );
+  const validationReportRetentionLimit = Math.max(
+    1,
+    Number(options.validationReportRetentionLimit || process.env.OWNER_CONTROL_VALIDATION_REPORT_RETENTION_LIMIT || 200),
+  );
 
   function getClientRow(slug) {
     const safeSlug = normalizeSlug(slug);
@@ -1070,6 +1084,34 @@ function createControlStore(options = {}) {
 
   function getOwnerRuntimeRow() {
     return db.prepare("SELECT runtime_config_json, updated_at FROM owner_runtime_state WHERE id = 1").get();
+  }
+
+  function pruneHealthReports(slug) {
+    db.prepare(`
+      DELETE FROM health_reports
+      WHERE client_slug = ?
+        AND id NOT IN (
+          SELECT id
+          FROM health_reports
+          WHERE client_slug = ?
+          ORDER BY received_at DESC, id DESC
+          LIMIT ?
+        )
+    `).run(slug, slug, healthReportRetentionLimit);
+  }
+
+  function pruneValidationReports(slug) {
+    db.prepare(`
+      DELETE FROM validation_reports
+      WHERE client_slug = ?
+        AND id NOT IN (
+          SELECT id
+          FROM validation_reports
+          WHERE client_slug = ?
+          ORDER BY received_at DESC, id DESC
+          LIMIT ?
+        )
+    `).run(slug, slug, validationReportRetentionLimit);
   }
 
   function buildOwnerRuntimeConfig(row = getOwnerRuntimeRow(), options = {}) {
@@ -1659,6 +1701,7 @@ function createControlStore(options = {}) {
           SET health_status = ?, latest_health_at = ?, updated_at = ?
           WHERE slug = ?
         `).run(status, receivedAt, receivedAt, slug);
+        pruneHealthReports(slug);
       })();
 
       return {
@@ -1693,6 +1736,7 @@ function createControlStore(options = {}) {
         SET health_status = ?, latest_health_at = ?, updated_at = ?
         WHERE slug = ?
       `).run(status, receivedAt, receivedAt, slug);
+      pruneHealthReports(slug);
       return Number(result.lastInsertRowid);
     })();
 
@@ -1738,6 +1782,7 @@ function createControlStore(options = {}) {
         SET latest_validation_at = ?, updated_at = ?
         WHERE slug = ?
       `).run(receivedAt, receivedAt, slug);
+      pruneValidationReports(slug);
       return Number(result.lastInsertRowid);
     })();
 
