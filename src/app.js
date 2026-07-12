@@ -177,6 +177,16 @@ function buildHttpsRedirectUrl(request, publicOrigin) {
   return new URL(request.originalUrl || request.url || "/", publicOrigin).toString();
 }
 
+function isRailwayHealthcheckRequest(request) {
+  const hostname = String(request.headers.host || "")
+    .trim()
+    .toLowerCase()
+    .replace(/:\d+$/, "");
+  return ["GET", "HEAD"].includes(request.method)
+    && request.path === "/api/health"
+    && hostname === "healthcheck.railway.app";
+}
+
 function createApp(options = {}) {
   const app = express();
   const store = options.store || createControlStore({ dbPath: options.dbPath });
@@ -252,7 +262,12 @@ function createApp(options = {}) {
     if (isHttpsRequest(request, isTrustedProxyAddress) && hstsMaxAgeSeconds > 0) {
       response.setHeader("Strict-Transport-Security", `max-age=${hstsMaxAgeSeconds}`);
     }
-    if (forceHttps && !isHttpsRequest(request, isTrustedProxyAddress) && !isLoopbackRequest(request)) {
+    if (
+      forceHttps
+      && !isRailwayHealthcheckRequest(request)
+      && !isHttpsRequest(request, isTrustedProxyAddress)
+      && !isLoopbackRequest(request)
+    ) {
       response.setHeader("Cache-Control", "no-store");
       const redirectUrl = ["GET", "HEAD"].includes(String(request.method || "GET").toUpperCase()) && !request.path.startsWith("/api/")
         ? buildHttpsRedirectUrl(request, publicOrigin)
