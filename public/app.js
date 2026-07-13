@@ -35,6 +35,8 @@ const state = {
   detailSection: "config",
   detail: null,
   loading: false,
+  detailPollTimerId: null,
+  detailRefreshInFlight: false,
 };
 
 const refs = {
@@ -90,6 +92,7 @@ const OWNER_RUNTIME_PRIMARY_KEYS = new Set([
   "OWNER_CONTROL_RATE_LIMIT_MAX",
   "OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT",
 ]);
+const CLIENT_DETAIL_REFRESH_INTERVAL_MS = 15000;
 const RUNTIME_GROUP_ORDER = [
   "Red",
   "Seguridad",
@@ -233,6 +236,7 @@ function setOwnerRuntimeFormEnabled(enabled) {
 }
 
 function resetAuthenticatedOwnerState() {
+  stopDetailRefreshPolling();
   state.clients = [];
   state.selectedSlug = "";
   state.detail = null;
@@ -247,6 +251,50 @@ function resetAuthenticatedOwnerState() {
 function setDetailSection(section) {
   state.detailSection = DETAIL_SECTIONS.has(section) ? section : "config";
   renderDetailSection();
+}
+
+function canRefreshSelectedDetail() {
+  return Boolean(
+    state.selectedSlug
+    && getToken()
+    && (typeof document === "undefined" || !document.hidden),
+  );
+}
+
+function stopDetailRefreshPolling() {
+  if (state.detailPollTimerId) {
+    clearInterval(state.detailPollTimerId);
+    state.detailPollTimerId = null;
+  }
+}
+
+function syncDetailRefreshPolling(options = {}) {
+  const immediate = options.immediate === true;
+  if (!canRefreshSelectedDetail()) {
+    stopDetailRefreshPolling();
+    return;
+  }
+
+  if (immediate) {
+    void refreshSelectedDetailQuietly();
+  }
+
+  if (state.detailPollTimerId) {
+    return;
+  }
+
+  state.detailPollTimerId = setInterval(() => {
+    void refreshSelectedDetailQuietly();
+  }, CLIENT_DETAIL_REFRESH_INTERVAL_MS);
+}
+
+function handleDetailRefreshVisibilityChange() {
+  if (typeof document !== "undefined" && document.hidden) {
+    stopDetailRefreshPolling();
+    return;
+  }
+
+  syncDetailRefreshPolling({ immediate: true });
 }
 
 function renderDetailSection() {
@@ -816,6 +864,7 @@ async function loadClients() {
     setStatus(error.message || "No pude cargar clientes.", "error");
   } finally {
     state.loading = false;
+    syncDetailRefreshPolling();
   }
 }
 
@@ -838,12 +887,14 @@ async function loadDetail(slug) {
   const response = await ownerFetch(`/api/owner/clients/${encodeURIComponent(slug)}`);
   state.detail = response;
   renderDetail();
+  syncDetailRefreshPolling();
 }
 
 async function refreshSelectedDetailQuietly() {
-  if (!state.selectedSlug || !getToken() || document.hidden) {
+  if (!state.selectedSlug || !getToken() || document.hidden || state.detailRefreshInFlight) {
     return;
   }
+  state.detailRefreshInFlight = true;
   try {
     const response = await ownerFetch(`/api/owner/clients/${encodeURIComponent(state.selectedSlug)}`);
     state.detail = response;
@@ -859,6 +910,8 @@ async function refreshSelectedDetailQuietly() {
     renderValidations(response.validationReports || []);
   } catch (_error) {
     // El panel puede quedar abierto mientras el servicio reinicia; no molestamos al owner.
+  } finally {
+    state.detailRefreshInFlight = false;
   }
 }
 
@@ -1036,6 +1089,7 @@ setDetailFormsEnabled(false);
 setOwnerRuntimeFormEnabled(false);
 renderOwnerRuntimeConfig();
 void loadClients();
-setInterval(() => {
-  void refreshSelectedDetailQuietly();
-}, 3000);
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("visibilitychange", handleDetailRefreshVisibilityChange);
+}
+syncDetailRefreshPolling();

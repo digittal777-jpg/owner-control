@@ -18,6 +18,7 @@ test("quiet client refresh updates status without rebuilding unsaved forms", () 
   assert.match(source, /renderClientConfigSyncSummary\(response\)/);
   assert.match(source, /renderClientRuntimeConfigSyncSummary\(response\)/);
   assert.match(source, /renderHealth\(response\.healthReports \|\| \[\]\)/);
+  assert.match(source, /state\.detailRefreshInFlight/);
   assert.doesNotMatch(source, /renderDetail\(\)/);
   assert.doesNotMatch(source, /renderClientRuntimeConfig\(/);
 });
@@ -27,4 +28,16 @@ test("Variables POS explains bootstrap pairing instead of rendering it as synced
   assert.match(APP_SOURCE, /CONTROL_CLIENT_SECRET=&lt;API key creada o rotada&gt;/);
   assert.match(APP_SOURCE, /variables\.filter\(\(variable\) => variable\.managedByClientSync !== false\)/);
   assert.match(APP_SOURCE, /if \(!value\) \{\s+return;\s+\}/);
+});
+
+test("owner panel pauses quiet polling while hidden and keeps Railway sleep config in repo", () => {
+  assert.match(APP_SOURCE, /const CLIENT_DETAIL_REFRESH_INTERVAL_MS = 15000;/);
+  assert.match(APP_SOURCE, /function stopDetailRefreshPolling\(\)/);
+  assert.match(APP_SOURCE, /function syncDetailRefreshPolling\(options = \{\}\)/);
+  assert.match(APP_SOURCE, /typeof document\.addEventListener === "function"/);
+  assert.match(APP_SOURCE, /document\.addEventListener\("visibilitychange", handleDetailRefreshVisibilityChange\)/);
+
+  const railwayConfig = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "railway.json"), "utf8"));
+  assert.equal(railwayConfig.deploy?.sleepApplication, true);
+  assert.equal(railwayConfig.deploy?.healthcheckPath, "/api/health");
 });
