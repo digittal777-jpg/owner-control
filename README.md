@@ -133,6 +133,18 @@ OWNER_CONTROL_HEALTH_REPORT_RETENTION_LIMIT=200
 OWNER_CONTROL_VALIDATION_REPORT_RETENTION_LIMIT=200
 ```
 
+Para podar reportes historicos que ya existian antes de activar la retencion, ejecuta primero dry-run:
+
+```bash
+npm run maintenance:prune-reports
+```
+
+Si el conteo es correcto, aplica la poda:
+
+```bash
+npm run maintenance:prune-reports -- --apply
+```
+
 ## Pruebas
 
 ```bash

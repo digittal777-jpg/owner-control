@@ -348,7 +348,7 @@ test("owner-control scrubs legacy plaintext pairing values from client runtime s
   }
 });
 
-test("owner-control key rotation invalidates the old POS key and accepts the new signed POS key", async (t) => {
+test("owner-control key rotation keeps old POS key in grace without marking pairing repaired", async (t) => {
   const server = await startServer(t);
   const slug = "cremeria-rincon";
   const created = await createClient(server.baseUrl, slug);
@@ -362,17 +362,29 @@ test("owner-control key rotation invalidates the old POS key and accepts the new
   const rotate = await json(server.baseUrl, `/api/owner/clients/${slug}/rotate-key`, {
     method: "POST",
     headers: ownerHeaders(),
+    body: JSON.stringify({ graceMinutes: 30 }),
   });
   assert.equal(rotate.status, 200);
   assert.match(rotate.body.apiKey, /^pos_/);
   assert.notEqual(rotate.body.apiKey, oldKey);
+  assert.ok(rotate.body.previousKeyValidUntil);
   assert.equal(rotate.body.client.runtimeConfig.sync.pairingInSync, false);
+  assert.equal(rotate.body.client.runtimeConfig.sync.previousKeyStillValid, true);
 
   const oldKeyAfterRotate = await json(server.baseUrl, "/api/client/subscription", {
     headers: signedClientHeaders(slug, oldKey, "GET", "/api/client/subscription"),
   });
-  assert.equal(oldKeyAfterRotate.status, 403);
-  assert.match(String(oldKeyAfterRotate.body?.message || ""), /Credenciales de cliente invalidas/i);
+  assert.equal(oldKeyAfterRotate.status, 200);
+
+  const detailDuringGrace = await json(server.baseUrl, `/api/owner/clients/${slug}`, {
+    headers: ownerHeaders(),
+  });
+  assert.equal(detailDuringGrace.status, 200);
+  assert.equal(detailDuringGrace.body.client.runtimeConfig.sync.pairingInSync, false);
+  assert.match(
+    String(detailDuringGrace.body.client.runtimeConfig.sync.message || ""),
+    /llave anterior sigue en gracia/i,
+  );
 
   const newKeyAfterRotate = await json(server.baseUrl, "/api/client/subscription", {
     headers: signedClientHeaders(slug, rotate.body.apiKey, "GET", "/api/client/subscription"),
@@ -384,6 +396,27 @@ test("owner-control key rotation invalidates the old POS key and accepts the new
   });
   assert.equal(detail.status, 200);
   assert.equal(detail.body.client.runtimeConfig.sync.pairingInSync, true);
+});
+
+test("owner-control key rotation can expire old POS key immediately", async (t) => {
+  const server = await startServer(t);
+  const slug = "cremeria-sin-gracia";
+  const created = await createClient(server.baseUrl, slug);
+  const oldKey = created.apiKey;
+
+  const rotate = await json(server.baseUrl, `/api/owner/clients/${slug}/rotate-key`, {
+    method: "POST",
+    headers: ownerHeaders(),
+    body: JSON.stringify({ graceMinutes: 0 }),
+  });
+  assert.equal(rotate.status, 200);
+  assert.equal(rotate.body.previousKeyValidUntil, null);
+
+  const oldKeyAfterRotate = await json(server.baseUrl, "/api/client/subscription", {
+    headers: signedClientHeaders(slug, oldKey, "GET", "/api/client/subscription"),
+  });
+  assert.equal(oldKeyAfterRotate.status, 403);
+  assert.match(String(oldKeyAfterRotate.body?.message || ""), /Credenciales de cliente invalidas/i);
 });
 
 test("owner-control enforces API rate limit before memory buckets grow without bound", async (t) => {
@@ -470,4 +503,94 @@ test("owner-control retains only the latest POS health and validation reports pe
   assert.equal(detail.body.validationReports.length, 2);
   assert.equal(detail.body.healthReports[0].metrics.pendingSync, 4);
   assert.equal(detail.body.validationReports[0].url, "http://localhost:3100/4");
+});
+
+test("owner-control can prune historical health and validation reports already in storage", (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "owner-control-prune-reports-"));
+  const dbPath = path.join(tempDir, "owner-control.sqlite");
+  const store = createControlStore({
+    dbPath,
+    healthReportRetentionLimit: 2,
+    validationReportRetentionLimit: 2,
+  });
+  let db = null;
+  t.after(() => {
+    db?.close();
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const slug = "legacy-reports";
+  store.createClient({
+    slug,
+    businessName: "Legacy Reports",
+    baseUrl: "http://localhost:3100",
+  });
+
+  db = new Database(dbPath);
+  const insertHealth = db.prepare(`
+    INSERT INTO health_reports (
+      client_slug, status, reasons_json, actions_json, metrics_json, reported_at, received_at
+    ) VALUES (?, ?, '[]', '[]', ?, ?, ?)
+  `);
+  const insertValidation = db.prepare(`
+    INSERT INTO validation_reports (
+      client_slug, status, url, checks_json, summary_json, reported_at, received_at
+    ) VALUES (?, ?, ?, '[]', '{}', ?, ?)
+  `);
+
+  for (let index = 0; index < 5; index += 1) {
+    const receivedAt = new Date(Date.UTC(2026, 0, 1, 12, index, 0)).toISOString();
+    insertHealth.run(slug, "ok", JSON.stringify({ index }), receivedAt, receivedAt);
+    insertValidation.run(slug, "ok", `http://localhost/${index}`, receivedAt, receivedAt);
+  }
+
+  const dryRun = store.pruneRetainedReports();
+  assert.equal(dryRun.applied, false);
+  assert.equal(dryRun.deletedHealthReports, 3);
+  assert.equal(dryRun.deletedValidationReports, 3);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM health_reports").pluck().get(), 5);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM validation_reports").pluck().get(), 5);
+
+  const applied = store.pruneRetainedReports({ apply: true });
+  assert.equal(applied.applied, true);
+  assert.equal(applied.deletedHealthReports, 3);
+  assert.equal(applied.deletedValidationReports, 3);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM health_reports").pluck().get(), 2);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM validation_reports").pluck().get(), 2);
+  assert.deepEqual(
+    db.prepare("SELECT json_extract(metrics_json, '$.index') AS idx FROM health_reports ORDER BY received_at DESC").all().map((row) => row.idx),
+    [4, 3],
+  );
+});
+
+test("owner-control creates maintenance indexes for client and report history", (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "owner-control-indexes-"));
+  const dbPath = path.join(tempDir, "owner-control.sqlite");
+  const store = createControlStore({ dbPath });
+  const db = new Database(dbPath);
+  t.after(() => {
+    db.close();
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const indexes = db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'index'
+    ORDER BY name
+  `).all().map((row) => row.name);
+
+  [
+    "idx_clients_config_sync",
+    "idx_clients_runtime_sync",
+    "idx_clients_status_name",
+    "idx_health_reports_client_received",
+    "idx_health_reports_status_received",
+    "idx_validation_reports_client_received",
+    "idx_validation_reports_status_received",
+  ].forEach((indexName) => {
+    assert.ok(indexes.includes(indexName), `${indexName} should exist`);
+  });
 });

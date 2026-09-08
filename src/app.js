@@ -557,7 +557,7 @@ function createApp(options = {}) {
   app.post("/api/owner/clients/:slug/rotate-key", requireOwner, (request, response, next) => {
     try {
       response.json({
-        ...store.rotateClientKey(request.params.slug),
+        ...store.rotateClientKey(request.params.slug, request.body || {}),
         generatedAt: new Date().toISOString(),
       });
     } catch (error) {

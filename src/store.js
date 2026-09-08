@@ -35,7 +35,7 @@ const TRUST_PROXY_RUNTIME_KEYS = new Set([
 const RUNTIME_VARIABLE_DEFINITIONS = [
   { key: "PORT", group: "Host", label: "Puerto POS", description: "Puerto HTTP local. El host puede tener prioridad.", placeholder: "3100" },
   { key: "NODE_ENV", group: "Host", label: "Modo Node", description: "production, development o test.", placeholder: "production", type: "select", options: ["", "production", "development", "test"] },
-  { key: "POS_DB_PATH", group: "POS", label: "Base SQLite", description: "Ruta de la base SQLite del cliente.", placeholder: "data/retail-base-pos.sqlite" },
+  { key: "POS_DB_PATH", group: "POS", label: "Base SQLite", description: "Ruta de la base SQLite del cliente.", placeholder: "data/merxalia-pos.sqlite" },
   { key: "POS_WORKBOOK_PATH", group: "POS", label: "Excel base", description: "Catalogo usado al sembrar o reimportar.", placeholder: "catalogos/cremeria-base.xlsx" },
   { key: "POS_TIMEZONE", group: "POS", label: "Zona horaria", description: "Zona operativa para cortes y reportes.", placeholder: "America/Mexico_City" },
   { key: "POS_EXPORT_LOOKBACK_DAYS", group: "POS", label: "Dias exportables", description: "Ventana maxima para exportaciones.", placeholder: "14" },
@@ -201,6 +201,8 @@ const OWNER_ADMIN_SECTIONS = [
 ];
 const DEFAULT_ENABLED_MODULES = ["weighted_audit", "merchandise_requests"];
 const DEFAULT_ADMIN_CAPABILITIES = OWNER_ADMIN_SECTIONS.map((item) => item.code);
+const DEFAULT_CLIENT_KEY_ROTATION_GRACE_MINUTES = 60 * 24;
+const MAX_CLIENT_KEY_ROTATION_GRACE_MINUTES = 60 * 24 * 7;
 
 function createHttpError(message, statusCode = 400) {
   const error = new Error(message);
@@ -210,6 +212,12 @@ function createHttpError(message, statusCode = 400) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function shiftIsoMinutes(value, minutes) {
+  const date = value ? new Date(value) : new Date();
+  date.setUTCMinutes(date.getUTCMinutes() + Number(minutes || 0));
+  return date.toISOString();
 }
 
 function normalizeSlug(value) {
@@ -706,6 +714,12 @@ function buildClientRuntimeConfig(row, options = {}) {
   );
   const latestAuthenticatedAt = row.latest_authenticated_at || null;
   const pairingChangedAt = row.api_key_rotated_at || row.created_at || null;
+  const previousKeyValidUntil = row.previous_api_key_valid_until || null;
+  const previousKeyStillValid = Boolean(
+    row.previous_api_key_hash
+    && previousKeyValidUntil
+    && previousKeyValidUntil >= nowIso(),
+  );
   const pairingInSync = Boolean(
     !pairingChangedAt
     || (latestAuthenticatedAt && latestAuthenticatedAt >= pairingChangedAt),
@@ -718,7 +732,9 @@ function buildClientRuntimeConfig(row, options = {}) {
   }
   const syncMessage = !pairingInSync
     ? latestAuthenticatedAt
-      ? "API key rotada en owner-control. Actualiza CONTROL_CLIENT_SECRET en el POS para reactivar la sincronizacion."
+      ? previousKeyStillValid
+        ? `API key rotada en owner-control. La llave anterior sigue en gracia hasta ${previousKeyValidUntil}; actualiza CONTROL_CLIENT_SECRET antes de esa fecha.`
+        : "API key rotada en owner-control. Actualiza CONTROL_CLIENT_SECRET en el POS para reactivar la sincronizacion."
       : "Esperando que el POS se conecte por primera vez con la API key actual."
     : row.latest_runtime_sync_message || "";
 
@@ -747,6 +763,8 @@ function buildClientRuntimeConfig(row, options = {}) {
       pairingInSync,
       pairingChangedAt,
       latestAuthenticatedAt,
+      previousKeyValidUntil,
+      previousKeyStillValid,
     },
   };
   if (options.includeValues) {
@@ -821,6 +839,22 @@ function safeEqualHash(left, right) {
   const leftBuffer = Buffer.from(String(left || ""), "hex");
   const rightBuffer = Buffer.from(String(right || ""), "hex");
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function normalizeClientKeyRotationGraceMinutes(value) {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_CLIENT_KEY_ROTATION_GRACE_MINUTES;
+  }
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    throw createHttpError("La gracia de rotacion debe ser un numero de minutos mayor o igual a cero.", 400);
+  }
+
+  return Math.min(
+    MAX_CLIENT_KEY_ROTATION_GRACE_MINUTES,
+    Math.floor(numericValue),
+  );
 }
 
 function safeJsonParse(value, fallback) {
@@ -959,6 +993,8 @@ function initializeSchema(db) {
       grace_period_until TEXT,
       last_payment_at TEXT,
       api_key_hash TEXT NOT NULL,
+      previous_api_key_hash TEXT,
+      previous_api_key_valid_until TEXT,
       api_key_rotated_at TEXT NOT NULL,
       health_status TEXT NOT NULL DEFAULT 'unknown',
       latest_health_at TEXT,
@@ -1012,7 +1048,9 @@ function initializeSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_payments_client_created ON payments(client_slug, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_health_reports_client_received ON health_reports(client_slug, received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_health_reports_status_received ON health_reports(status, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_validation_reports_client_received ON validation_reports(client_slug, received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_validation_reports_status_received ON validation_reports(status, received_at DESC);
   `);
   db.prepare(`
     INSERT OR IGNORE INTO owner_runtime_state (id, runtime_config_json, updated_at)
@@ -1044,6 +1082,13 @@ function initializeSchema(db) {
   ensureColumn(db, "clients", "latest_runtime_sync_keys_json", "latest_runtime_sync_keys_json TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "clients", "latest_runtime_sync_hash", "latest_runtime_sync_hash TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "clients", "latest_authenticated_at", "latest_authenticated_at TEXT");
+  ensureColumn(db, "clients", "previous_api_key_hash", "previous_api_key_hash TEXT");
+  ensureColumn(db, "clients", "previous_api_key_valid_until", "previous_api_key_valid_until TEXT");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_clients_status_name ON clients(status, business_name COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_clients_config_sync ON clients(latest_config_sync_status, config_updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_clients_runtime_sync ON clients(latest_runtime_sync_status, runtime_config_updated_at DESC);
+  `);
   db.prepare(`
     UPDATE clients
     SET config_updated_at = COALESCE(config_updated_at, updated_at, created_at)
@@ -1146,6 +1191,53 @@ function createControlStore(options = {}) {
           LIMIT ?
         )
     `).run(slug, slug, validationReportRetentionLimit);
+  }
+
+  function pruneRetainedReports(options = {}) {
+    const apply = Boolean(options.apply);
+    const clients = db.prepare("SELECT slug FROM clients ORDER BY slug").all();
+    const healthCount = db.prepare("SELECT COUNT(*) AS count FROM health_reports WHERE client_slug = ?").pluck();
+    const validationCount = db.prepare("SELECT COUNT(*) AS count FROM validation_reports WHERE client_slug = ?").pluck();
+    const result = {
+      applied: apply,
+      healthReportRetentionLimit,
+      validationReportRetentionLimit,
+      clients: [],
+      deletedHealthReports: 0,
+      deletedValidationReports: 0,
+    };
+
+    const runPrune = db.transaction((slug) => {
+      const beforeHealth = Number(healthCount.get(slug) || 0);
+      const beforeValidation = Number(validationCount.get(slug) || 0);
+      if (apply) {
+        pruneHealthReports(slug);
+        pruneValidationReports(slug);
+      }
+      const afterHealth = apply
+        ? Number(healthCount.get(slug) || 0)
+        : Math.min(beforeHealth, healthReportRetentionLimit);
+      const afterValidation = apply
+        ? Number(validationCount.get(slug) || 0)
+        : Math.min(beforeValidation, validationReportRetentionLimit);
+      const deletedHealthReports = Math.max(0, beforeHealth - afterHealth);
+      const deletedValidationReports = Math.max(0, beforeValidation - afterValidation);
+
+      result.deletedHealthReports += deletedHealthReports;
+      result.deletedValidationReports += deletedValidationReports;
+      result.clients.push({
+        slug,
+        healthReportsBefore: beforeHealth,
+        healthReportsAfter: afterHealth,
+        validationReportsBefore: beforeValidation,
+        validationReportsAfter: afterValidation,
+        deletedHealthReports,
+        deletedValidationReports,
+      });
+    });
+
+    clients.forEach((client) => runPrune(client.slug));
+    return result;
   }
 
   function buildOwnerRuntimeConfig(row = getOwnerRuntimeRow(), options = {}) {
@@ -1567,18 +1659,35 @@ function createControlStore(options = {}) {
     };
   }
 
-  function rotateClientKey(slug) {
+  function rotateClientKey(slug, options = {}) {
     const row = requireClientRow(slug);
     const apiKey = generateApiKey();
     const now = nowIso();
+    const graceMinutes = normalizeClientKeyRotationGraceMinutes(
+      options.graceMinutes ?? options.grace_minutes,
+    );
+    const previousKeyValidUntil = graceMinutes > 0 ? shiftIsoMinutes(now, graceMinutes) : null;
     db.prepare(`
       UPDATE clients
-      SET api_key_hash = ?, api_key_rotated_at = ?, updated_at = ?
+      SET
+        api_key_hash = ?,
+        previous_api_key_hash = ?,
+        previous_api_key_valid_until = ?,
+        api_key_rotated_at = ?,
+        updated_at = ?
       WHERE slug = ?
-    `).run(hashApiKey(apiKey), now, now, row.slug);
+    `).run(
+      hashApiKey(apiKey),
+      row.api_key_hash,
+      previousKeyValidUntil,
+      now,
+      now,
+      row.slug,
+    );
     return {
       client: mapClient(requireClientRow(row.slug)),
       apiKey,
+      previousKeyValidUntil,
     };
   }
 
@@ -1588,8 +1697,19 @@ function createControlStore(options = {}) {
       throw createHttpError("Credenciales de cliente invalidas.", 403);
     }
     const candidateHash = hashApiKey(apiKey);
-    if (!safeEqualHash(candidateHash, row.api_key_hash)) {
+    const matchesCurrentKey = safeEqualHash(candidateHash, row.api_key_hash);
+    const matchesPreviousKey = Boolean(
+      !matchesCurrentKey
+      && row.previous_api_key_hash
+      && row.previous_api_key_valid_until
+      && row.previous_api_key_valid_until >= nowIso()
+      && safeEqualHash(candidateHash, row.previous_api_key_hash),
+    );
+    if (!matchesCurrentKey && !matchesPreviousKey) {
       throw createHttpError("Credenciales de cliente invalidas.", 403);
+    }
+    if (matchesPreviousKey) {
+      return mapClient(row);
     }
     const latestAuthenticatedAt = String(row.latest_authenticated_at || "");
     const pairingChangedAt = String(row.api_key_rotated_at || row.created_at || "");
@@ -1852,6 +1972,7 @@ function createControlStore(options = {}) {
     authenticateClient,
     recordClientConfigSync,
     recordClientRuntimeConfigSync,
+    pruneRetainedReports,
     receiveHealthReport,
     receiveValidationReport,
     updateClientConfig,
