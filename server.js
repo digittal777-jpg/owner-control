@@ -227,7 +227,7 @@ const redirectServer = httpsCredentials.enabled && HTTP_REDIRECT_PORT > 0
   })
   : null;
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   const protocol = httpsCredentials.enabled ? "https" : "http";
   console.log(`Owner control listo en ${protocol}://localhost:${PORT}`);
   console.log(`Base owner-control: ${DB_PATH}`);
